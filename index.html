@@ -581,13 +581,26 @@ function exportLearningRecords(){
   downloadBlob('交安学习记录备份.json',JSON.stringify(payload,null,2),'application/json;charset=utf-8');
   return payload;
 }
+function compatibleRecordVersion(version){
+  return version===null || version==='v2';
+}
 function validateLearningBackup(data){
   if(!data || data.format!=='jiaoan-learning-records' || (data.schema!==1 && data.schema!==2))throw Error('不是支持的学习记录备份');
   if(!data.identity || data.identity.sha256!==BANK_IDENTITY.sha256 || data.identity.count!==TOTAL)throw Error('题库身份不匹配：拒绝导入，不能猜测下标映射');
   var parsed=decodeLearningRecords(data.storage);
-  if(parsed.version!==localStorage.getItem('jiaoan_version'))throw Error('记录版本不匹配：拒绝导入，请先核对旧题库映射');
-  if(parsed.version!==null && parsed.version!=='v2')throw Error('未知旧版本不能自动合并；原文件及记录均保留');
+  var localVersion=null;
+  try{localVersion=localStorage.getItem('jiaoan_version');}catch(e){localVersion=null;}
+  // 题库身份哈希负责确认下标。null 与 v2 是同一代：本页启动和保存都不写版本键，旧备份中的原始字符串 v2 不能要求本机已经存着同一个键。
+  if(!compatibleRecordVersion(parsed.version))throw Error('未知旧版本不能自动合并；原文件及记录均保留');
+  if(!compatibleRecordVersion(localVersion))throw Error('本机记录版本未知，已原样保留；拒绝导入，请先核对旧题库映射');
   parsed.schema=data.schema;
+  parsed.localVersion=localVersion;
+  parsed.versionNote='';
+  if(localVersion===null && parsed.version==='v2'){
+    parsed.versionNote='本机原先没有 jiaoan_version。这份 v2 备份与当前题库身份一致，按原下标合并，不改题目顺序，也不把已做题换算成多次作答。合并成功后才写入 v2。';
+  }else if(localVersion==='v2' && parsed.version===null){
+    parsed.versionNote='备份没有版本键。题库身份与本机 v2 记录一致，按原下标合并；本机版本键保持 v2。';
+  }
   parsed.stats=null;
   // 旧 schema 1 没有统计。即使文件里夹了 stats 也不读取，避免把历史最后答案或来历不明的次数算进来。
   if(data.schema===2 && data.stats!=null){
@@ -605,7 +618,7 @@ function mergeLearningBackup(data, explicitlyMerge){
   var answered=Object.assign({},incoming.answered,existing.answered); // 本机冲突答案优先
   var wrong=Array.from(new Set(existing.wrong.concat(incoming.wrong))).sort(function(a,b){return a-b;});
   var correct=Array.from(new Set(existing.correct.concat(incoming.correct))).filter(function(i){return wrong.indexOf(i)<0;}).sort(function(a,b){return a-b;});
-  // 导入前自动下载原始备份，任何异常尽量回滚；永不写版本键。
+  // 校验通过后才备份并写入。失败时恢复四个记录键，不留下新的版本值。
   // 统计按题目保留次数较高的那一份，不把两份次数相加。没有 stats 的旧备份不改现有统计。
   exportLearningRecords();
   var beforeStats=null;
@@ -622,8 +635,9 @@ function mergeLearningBackup(data, explicitlyMerge){
       localStorage.setItem('jiaoan_stats',JSON.stringify(mergedStats));
       state.smart=mergedStats;
     }
+    if(before.jiaoan_version===null && incoming.version==='v2') localStorage.setItem('jiaoan_version','v2');
   }catch(e){
-    RECORD_KEYS.slice(0,3).forEach(function(k){if(before[k]===null)localStorage.removeItem(k);else localStorage.setItem(k,before[k]);});
+    RECORD_KEYS.forEach(function(k){if(before[k]===null)localStorage.removeItem(k);else localStorage.setItem(k,before[k]);});
     if(beforeStats===null) localStorage.removeItem('jiaoan_stats');
     else localStorage.setItem('jiaoan_stats', beforeStats);
     if(beforeStats===null) state.smart=emptySmartStats();
@@ -631,11 +645,11 @@ function mergeLearningBackup(data, explicitlyMerge){
     throw Error('保存失败，已尝试恢复原记录：'+e.message);
   }
   state.answered=answered;state.wrong=wrong;state.correct=correct;state.quiz=null;
-  return {answered:Object.keys(answered).length,wrong:wrong.length,correct:correct.length};
+  return {answered:Object.keys(answered).length,wrong:wrong.length,correct:correct.length,versionNote:incoming.versionNote||''};
 }
 function showRecordImport(){
   document.getElementById('mainContent').innerHTML='<div class="card"><div class="card-title">导入学习记录备份</div>'+recordCompatibilityNotice()+
-    '<p style="line-height:1.8;font-size:14px;">支持本页导出的同题库同版本备份，也兼容只有四个旧记录键的 schema 1 备份。安全合并：本机答案优先、错题取并集。新的作答次数按题目保留较高的那一份，不会把两份次数相加，重复导入同一份也不会越加越多。旧备份没有次数时，不改现有统计，也不会把历史最后一次答案换算成多次错误。静态页面在不同设备之间不会自动同步。</p>'+
+    '<p style="line-height:1.8;font-size:14px;">支持本页导出的备份，也兼容同题库身份的 schema 1 v2 备份。本机如果还没有 jiaoan_version，只说明这个页面以前没有写入版本键，不表示题库不同。身份哈希一致时按原下标合并；未知版本或不同题库仍会拒绝，而且拒绝时不改版本、不清记录。安全合并：本机答案优先、错题取并集。新的作答次数按题目保留较高的那一份，重复导入不会相加。旧备份没有次数时，不改现有统计，也不会把历史最后一次答案换算成多次错误。静态页面在不同设备之间不会自动同步。</p>'+
     '<input id="recordImportFile" type="file" accept=".json,application/json" style="margin:16px 0;"><br>'+
     '<label><input id="recordMergeConsent" type="checkbox"> 我选择安全合并，已知不会覆盖本机冲突答案</label>'+
     '<div class="ess-actions"><button class="btn btn-primary" onclick="importLearningRecords()">检查并安全合并</button><button class="btn btn-default" onclick="renderHome()">返回首页</button></div><p id="recordImportStatus" style="white-space:pre-wrap;"></p></div>';
@@ -647,10 +661,12 @@ async function importLearningRecords(){
     if(!file)throw Error('请选择备份 JSON 文件');
     if(file.size>5*1024*1024)throw Error('备份文件过大（上限 5MB）');
     if(!document.getElementById('recordMergeConsent').checked)throw Error('请先勾选安全合并');
-    var parsed=JSON.parse(await file.text());
-    validateLearningBackup(parsed);
-    if(!confirm('确认安全合并？将先下载本机原始记录备份，保留本机冲突答案和全部错题。'))return;
-    var result=mergeLearningBackup(parsed,true);
+    var data=JSON.parse(await file.text());
+    var checked=validateLearningBackup(data);
+    var note='确认安全合并？将先下载本机原始记录备份，保留本机冲突答案和全部错题。';
+    if(checked.versionNote) note+='\n\n'+checked.versionNote;
+    if(!confirm(note))return;
+    var result=mergeLearningBackup(data,true);
     renderHome();showToast('已安全合并：已做 '+result.answered+' 题，错题 '+result.wrong+' 题');
   }catch(e){status.textContent='未导入：'+e.message;}
 }
@@ -782,7 +798,7 @@ function renderHome(){
     '<div class="mode-item" onclick="showAllQuestions()"><div class="m-icon">📖</div><div class="m-title">题库浏览</div><div class="m-desc">全部'+TOTAL+'题 · 可搜索/筛选</div></div>' +
     '</div></div>' +
     '<div class="card"><div class="card-title">学习记录备份 / 恢复</div>'+recordCompatibilityNotice()+
-    '<p style="font-size:13px;line-height:1.8;">有效解析 '+EXPLANATIONS.meta.explained+' / '+TOTAL+'，待核验 '+EXPLANATIONS.meta.review+'，待完善 '+EXPLANATIONS.meta.pending+'（未完成提示不计解析）。更新不重置记录。先导出备份，再选择同题库、同版本的备份安全合并；本机已有答案冲突时保留本机答案，错题优先保留。作答次数按题目保留较高的一份，重复导入不会相加。这是静态页面，换手机、换浏览器或换文件地址都不会自动同步，需要导出后再导入。</p>'+ 
+    '<p style="font-size:13px;line-height:1.8;">有效解析 '+EXPLANATIONS.meta.explained+' / '+TOTAL+'，待核验 '+EXPLANATIONS.meta.review+'，待完善 '+EXPLANATIONS.meta.pending+'（未完成提示不计解析）。更新不重置记录。先导出备份，再选择同一题库身份的备份安全合并；本机已有答案冲突时保留本机答案，错题优先保留。作答次数按题目保留较高的一份，重复导入不会相加。这是静态页面，换手机、换浏览器或换文件地址都不会自动同步，需要导出后再导入。</p>'+ 
     '<div class="ess-actions"><button class="btn btn-primary" onclick="exportLearningRecords()">导出学习记录备份</button><button class="btn btn-default" onclick="showRecordImport()">导入学习记录（安全合并）</button></div></div>' +
     '<div class="card"><div class="card-title"><span class="icon">📊</span>学习进度</div>' +
     '<div class="stat-row"><span class="label">已练习题数</span><span class="value">'+done+' / '+TOTAL+'</span></div>' +

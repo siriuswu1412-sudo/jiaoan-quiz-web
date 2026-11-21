@@ -1,4 +1,4 @@
-var CACHE = "jiaoan-quiz-v1";
+var CACHE = "jiaoan-quiz-v2";
 var FILES = [
   "./",
   "./index.html",
@@ -8,7 +8,7 @@ var FILES = [
   "./robots.txt"
 ];
 self.addEventListener("install", function (event) {
-  event.waitUntil(caches.open(CACHE).then(function (cache) { return cache.addAll(FILES); }));
+  event.waitUntil(caches.open(CACHE).then(function (cache) { return cache.addAll(FILES); }).then(function () { return self.skipWaiting(); }));
 });
 self.addEventListener("activate", function (event) {
   event.waitUntil(caches.keys().then(function (keys) {
